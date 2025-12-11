@@ -1,0 +1,14 @@
+project/
+│ bot.py
+│ config.py
+│ database.py
+│ requirements.txt
+│ .env
+│ structure.txt
+│ bot_data.db 
+│
+└── __pycache__
+│      └── database.cpython-310.pyc
+│
+└── cogs/
+       └── rules.py

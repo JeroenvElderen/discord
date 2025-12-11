@@ -1,0 +1,26 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment variables
+.env
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# VSCode settings
+.vscode/
+
+# MacOS metadata
+.DS_Store
+
+# SQLite database file
+bot_data.db
+
+# Railway volumes (if used)
+storage/
