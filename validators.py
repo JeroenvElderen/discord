@@ -7,6 +7,11 @@ import re
 import sys
 from typing import Optional
 
+# Constants for validation
+MIN_TOKEN_LENGTH = 50  # Minimum expected length for a Discord bot token
+MIN_VALID_SNOWFLAKE = 41771983423143936  # Minimum Discord Snowflake (~2015)
+MAX_VALID_SNOWFLAKE = 9223372036854775807  # Maximum 64-bit signed integer
+
 
 def validate_discord_token(token: Optional[str]) -> tuple[bool, str]:
     """
@@ -33,9 +38,9 @@ def validate_discord_token(token: Optional[str]) -> tuple[bool, str]:
     # - Part 1: Base64 encoded user ID
     # - Part 2: Timestamp
     # - Part 3: HMAC signature
-    # They're separated by dots and should be at least 50 characters
-    if len(token) < 50:
-        return False, "DISCORD_TOKEN appears to be too short (expected at least 50 characters)"
+    # They're separated by dots and should be at least MIN_TOKEN_LENGTH characters
+    if len(token) < MIN_TOKEN_LENGTH:
+        return False, f"DISCORD_TOKEN appears to be too short (expected at least {MIN_TOKEN_LENGTH} characters)"
     
     # Basic format check: should contain at least two dots (three parts)
     if token.count('.') < 2:
@@ -64,12 +69,12 @@ def validate_snowflake_id(snowflake_id: int, name: str) -> tuple[bool, str]:
     
     # Discord Snowflakes are 64-bit integers
     # They started using snowflakes around 2015, so we can do a sanity check
-    # Minimum valid snowflake (roughly 2015): 41771983423143936
-    # Maximum valid snowflake (64-bit max): 9223372036854775807
-    if snowflake_id < 41771983423143936:
+    # Minimum valid snowflake (roughly 2015): MIN_VALID_SNOWFLAKE
+    # Maximum valid snowflake (64-bit max): MAX_VALID_SNOWFLAKE
+    if snowflake_id < MIN_VALID_SNOWFLAKE:
         return False, f"{name} appears to be invalid (too small for a Discord Snowflake ID)"
     
-    if snowflake_id > 9223372036854775807:
+    if snowflake_id > MAX_VALID_SNOWFLAKE:
         return False, f"{name} appears to be invalid (exceeds maximum Snowflake ID)"
     
     return True, ""
