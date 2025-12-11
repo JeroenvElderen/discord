@@ -1,12 +1,21 @@
 import discord
 import config
+import sys
 
 from discord.ext import commands
 from database import setup_database, get_connection
 from dotenv import load_dotenv
+from validators import startup_validation_check
 import os
 
+# Load environment variables from .env file
 load_dotenv()
+
+# Validate configuration before proceeding
+if not startup_validation_check(config):
+    print("❌ Bot startup aborted due to configuration errors.")
+    sys.exit(1)
+
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 intents = discord.Intents.default()
@@ -45,4 +54,43 @@ async def ac(ctx):
     await ctx.send("Alive check: I'm running!")
 
 
-bot.run(TOKEN)
+# Start the bot with proper error handling
+if __name__ == "__main__":
+    try:
+        bot.run(TOKEN)
+    except discord.LoginFailure:
+        print("\n" + "="*60)
+        print("❌ LOGIN FAILED")
+        print("="*60)
+        print("The provided Discord token is invalid.")
+        print("\nPlease verify that:")
+        print("  1. Your DISCORD_TOKEN in .env is correct")
+        print("  2. The token hasn't been regenerated in Discord Developer Portal")
+        print("  3. The bot application still exists")
+        print("\nGet a new token from:")
+        print("  https://discord.com/developers/applications")
+        print("="*60 + "\n")
+        sys.exit(1)
+    except discord.PrivilegedIntentsRequired:
+        print("\n" + "="*60)
+        print("❌ PRIVILEGED INTENTS REQUIRED")
+        print("="*60)
+        print("Your bot requires privileged intents that aren't enabled.")
+        print("\nTo fix this:")
+        print("  1. Go to https://discord.com/developers/applications")
+        print("  2. Select your bot application")
+        print("  3. Go to the 'Bot' section")
+        print("  4. Enable 'SERVER MEMBERS INTENT' and 'MESSAGE CONTENT INTENT'")
+        print("  5. Save changes and restart the bot")
+        print("="*60 + "\n")
+        sys.exit(1)
+    except Exception as e:
+        print("\n" + "="*60)
+        print("❌ UNEXPECTED ERROR")
+        print("="*60)
+        print(f"An unexpected error occurred: {type(e).__name__}")
+        print(f"Details: {str(e)}")
+        print("\nPlease check your configuration and try again.")
+        print("="*60 + "\n")
+        sys.exit(1)
+
