@@ -9,6 +9,12 @@ import os
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
+if not TOKEN:
+    raise ValueError(
+        "DISCORD_TOKEN environment variable is not set. "
+        "Please create a .env file with DISCORD_TOKEN=your_token_here or set the environment variable."
+    )
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
