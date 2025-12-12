@@ -4,14 +4,13 @@
 # Update these values as your server grows.
 # ==============================
 
-
 # ===== ROLES =====
 ROLE_MEMBER = 1427669538983645308
 
 
 # ===== CHANNELS =====
 CHANNEL_RULES = 1427592518597476354
-
+CHANNEL_INTRODUCTIONS = 1449052535947137054
 
 # ===== CATEGORIES =====
 # Example:

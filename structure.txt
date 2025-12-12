@@ -7,8 +7,10 @@ project/
 │ structure.txt
 │ bot_data.db 
 │
-└── __pycache__
+├── __pycache__
 │      └── database.cpython-310.pyc
 │
-└── cogs/
-       └── rules.py
+├── cogs/
+│      ├── introductions.py
+│      └── rules.py
+
