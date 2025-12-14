@@ -1,3 +1,6 @@
 discord.py==2.3.2
 python-dotenv
 aiohttp
+nudenet
+pillow
+opencv-python-headless
