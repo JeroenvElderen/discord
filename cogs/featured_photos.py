@@ -33,18 +33,24 @@ class FeaturedPhotos(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    # --------------------------------------------------
+    # Proper lifecycle handling (IMPORTANT)
+    # --------------------------------------------------
+
+    async def cog_load(self):
         dublin = ZoneInfo("Europe/Dublin")
         self._weekly_featured_task.change_interval(
             time=dt_time(hour=18, minute=0, tzinfo=dublin)
         )
         self._weekly_featured_task.start()
 
-    def cog_unload(self):
+    async def cog_unload(self):
         self._weekly_featured_task.cancel()
 
     # --------------------------------------------------
     # Startup hook (guarantees info embed exists)
     # --------------------------------------------------
+
     @commands.Cog.listener()
     async def on_ready(self):
         await self._ensure_info_embed()
@@ -52,6 +58,7 @@ class FeaturedPhotos(commands.Cog):
     # --------------------------------------------------
     # Moderator check
     # --------------------------------------------------
+
     def _is_moderator(self, member: discord.Member) -> bool:
         perms = member.guild_permissions
         return (
@@ -63,12 +70,12 @@ class FeaturedPhotos(commands.Cog):
     # --------------------------------------------------
     # Persistent Weekly Highlights info embed (PINNED)
     # --------------------------------------------------
+
     async def _ensure_info_embed(self):
         channel = self.bot.get_channel(CHANNEL_FEATURED_PHOTOS)
         if not isinstance(channel, discord.TextChannel):
             return
 
-        # Look for existing embed (pinned or not)
         async for msg in channel.history(limit=50, oldest_first=True):
             if (
                 msg.author == self.bot.user
@@ -76,7 +83,6 @@ class FeaturedPhotos(commands.Cog):
                 and msg.embeds[0].footer
                 and msg.embeds[0].footer.text == FEATURED_INFO_TAG
             ):
-                # Ensure it is pinned
                 if not msg.pinned:
                     try:
                         await msg.pin(reason="Weekly Highlights info")
@@ -84,7 +90,6 @@ class FeaturedPhotos(commands.Cog):
                         pass
                 return
 
-        # Create embed if not found
         embed = discord.Embed(
             title="🌟 Weekly Highlights",
             description=(
@@ -113,6 +118,7 @@ class FeaturedPhotos(commands.Cog):
     # --------------------------------------------------
     # Collect image candidates
     # --------------------------------------------------
+
     async def _collect_image_candidates(
         self,
         channel: discord.TextChannel,
@@ -120,9 +126,11 @@ class FeaturedPhotos(commands.Cog):
         max_messages: int = 5000,
     ) -> list[dict]:
 
-        cutoff = None
-        if days is not None:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=days)
+            if days is not None
+            else None
+        )
 
         candidates: list[dict] = []
 
@@ -171,6 +179,7 @@ class FeaturedPhotos(commands.Cog):
     # --------------------------------------------------
     # Weekly featured task
     # --------------------------------------------------
+
     @tasks.loop(time=dt_time(hour=18, minute=0, tzinfo=ZoneInfo("Europe/Dublin")))
     async def _weekly_featured_task(self):
         featured_channel = self.bot.get_channel(CHANNEL_FEATURED_PHOTOS)
@@ -190,12 +199,9 @@ class FeaturedPhotos(commands.Cog):
                 if not isinstance(channel, discord.TextChannel):
                     continue
 
-                try:
-                    pool.extend(
-                        await self._collect_image_candidates(channel, days=window)
-                    )
-                except Exception as e:
-                    print(f"❌ FeaturedPhotos: error scanning #{channel.name}: {e}")
+                pool.extend(
+                    await self._collect_image_candidates(channel, days=window)
+                )
 
             if pool:
                 chosen = random.choice(pool)
