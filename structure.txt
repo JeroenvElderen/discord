@@ -17,6 +17,7 @@ project/
 │      ├── weekly_wind_down.py
 │      ├── image_moderation.py
 │      ├── featured_photos.py
+│      ├── nature_route.py
 │      ├── daily_personal_updates.py
 │      └── rules.py
 
