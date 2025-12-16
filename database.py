@@ -15,7 +15,9 @@ def setup_database():
     conn = get_connection()
     c = conn.cursor()
 
-    # Table for members who accept the rules
+    # ======================
+    # Members
+    # ======================
     c.execute("""
         CREATE TABLE IF NOT EXISTS members (
             user_id INTEGER PRIMARY KEY,
@@ -24,7 +26,9 @@ def setup_database():
         )
     """)
 
-    # Table for daily image posting limits (restart-safe)
+    # ======================
+    # Daily image posting limits
+    # ======================
     c.execute("""
         CREATE TABLE IF NOT EXISTS daily_image_posts (
             user_id INTEGER NOT NULL,
@@ -34,7 +38,9 @@ def setup_database():
         )
     """)
 
-    # ✅ NEW: Table for daily personal updates (logbook)
+    # ======================
+    # Daily personal updates (logbook)
+    # ======================
     c.execute("""
         CREATE TABLE IF NOT EXISTS daily_personal_updates (
             user_id INTEGER NOT NULL,
@@ -44,6 +50,19 @@ def setup_database():
             content TEXT NOT NULL,
             created_at TEXT NOT NULL,
             PRIMARY KEY (user_id, channel_id, log_date)
+        )
+    """)
+
+    # ======================
+    # ✅ NEW: Featured photos history
+    # ======================
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS featured_photos (
+            image_url TEXT PRIMARY KEY,
+            channel_id INTEGER NOT NULL,
+            message_jump_url TEXT NOT NULL,
+            author_id INTEGER,
+            featured_at TEXT NOT NULL
         )
     """)
 
@@ -180,7 +199,7 @@ def insert_personal_update(
     created_at: str
 ) -> bool:
     """
-    Returns True if inserted, False if already exists (same user/channel/date).
+    Returns True if inserted, False if already exists.
     """
     conn = get_connection()
     c = conn.cursor()
@@ -239,7 +258,67 @@ def get_personal_update_by_date(user_id: int, log_date: str):
 
 
 def get_user_updates_for_mod_view(user_id: int, limit: int = 10):
-    """
-    Same as get_personal_updates, but kept separate for clarity / future expansion.
-    """
     return get_personal_updates(user_id, limit=limit)
+
+
+# ======================
+# ✅ Featured photos logic
+# ======================
+
+def is_image_already_featured(image_url: str) -> bool:
+    conn = get_connection()
+    c = conn.cursor()
+
+    c.execute(
+        """
+        SELECT 1 FROM featured_photos
+        WHERE image_url = ?
+        """,
+        (image_url,)
+    )
+
+    exists = c.fetchone() is not None
+    conn.close()
+    return exists
+
+
+def record_featured_photo(
+    image_url: str,
+    channel_id: int,
+    message_jump_url: str,
+    author_id: int | None,
+    featured_at: str,
+):
+    conn = get_connection()
+    c = conn.cursor()
+
+    c.execute(
+        """
+        INSERT OR IGNORE INTO featured_photos
+        (image_url, channel_id, message_jump_url, author_id, featured_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (image_url, channel_id, message_jump_url, author_id, featured_at)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def get_featured_history(limit: int = 20):
+    conn = get_connection()
+    c = conn.cursor()
+
+    c.execute(
+        """
+        SELECT image_url, channel_id, message_jump_url, author_id, featured_at
+        FROM featured_photos
+        ORDER BY featured_at DESC
+        LIMIT ?
+        """,
+        (limit,)
+    )
+
+    rows = c.fetchall()
+    conn.close()
+    return rows
