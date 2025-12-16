@@ -12,9 +12,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 if not TOKEN or not TOKEN.strip():
-    raise ValueError(
-        "DISCORD_TOKEN environment variable is not set or empty."
-    )
+    raise ValueError("DISCORD_TOKEN environment variable is not set or empty.")
 
 # =========================
 # Intents
@@ -33,7 +31,7 @@ bot = commands.Bot(
 )
 
 # =========================
-# Startup Logic (ONCE)
+# Cog Loader
 # =========================
 async def load_cogs():
     for filename in os.listdir("./cogs"):
@@ -41,26 +39,31 @@ async def load_cogs():
             await bot.load_extension(f"cogs.{filename[:-3]}")
             print(f"Loaded cog: {filename}")
 
-
+# =========================
+# Setup Hook (Runs ONCE)
+# =========================
 @bot.event
 async def setup_hook():
-    # Database init
+    # Initialize database
     setup_database()
 
-    # Load cogs ONCE
+    # Load cogs
     await load_cogs()
 
-    # Sync slash commands ONCE
-    await bot.tree.sync()
-    print("Slash commands synced.")
+    # Sync slash commands (safe, no env changes)
+    try:
+        await bot.tree.sync()
+        print("✅ Slash commands synced globally.")
+    except Exception as e:
+        print(f"⚠️ Slash command sync failed: {e}")
 
-
+# =========================
+# Ready Event
+# =========================
 @bot.event
 async def on_ready():
-    # Presence / logging ONLY
     print(f"Logged in as {bot.user} (ID: {bot.user.id})")
     print("------")
-
 
 # =========================
 # Example Slash Command
@@ -69,7 +72,6 @@ async def on_ready():
 async def hello(interaction: discord.Interaction):
     await interaction.response.send_message("Hello! I am alive.")
 
-
 # =========================
 # Example Prefix Command
 # =========================
@@ -77,8 +79,7 @@ async def hello(interaction: discord.Interaction):
 async def ac(ctx):
     await ctx.send("Alive check: I'm running!")
 
-
 # =========================
-# Run
+# Run Bot
 # =========================
 bot.run(TOKEN)

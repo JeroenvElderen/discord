@@ -34,6 +34,19 @@ def setup_database():
         )
     """)
 
+    # ✅ NEW: Table for daily personal updates (logbook)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS daily_personal_updates (
+            user_id INTEGER NOT NULL,
+            channel_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            log_date TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, channel_id, log_date)
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -135,3 +148,98 @@ def cleanup_old_daily_posts():
 
     conn.commit()
     conn.close()
+
+
+# ======================
+# Daily personal update (logbook) logic
+# ======================
+
+def has_personal_update_today(user_id: int, channel_id: int, log_date: str) -> bool:
+    conn = get_connection()
+    c = conn.cursor()
+
+    c.execute(
+        """
+        SELECT 1 FROM daily_personal_updates
+        WHERE user_id = ? AND channel_id = ? AND log_date = ?
+        """,
+        (user_id, channel_id, log_date)
+    )
+
+    result = c.fetchone()
+    conn.close()
+    return result is not None
+
+
+def insert_personal_update(
+    user_id: int,
+    channel_id: int,
+    message_id: int,
+    log_date: str,
+    content: str,
+    created_at: str
+) -> bool:
+    """
+    Returns True if inserted, False if already exists (same user/channel/date).
+    """
+    conn = get_connection()
+    c = conn.cursor()
+
+    c.execute(
+        """
+        INSERT OR IGNORE INTO daily_personal_updates
+        (user_id, channel_id, message_id, log_date, content, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (user_id, channel_id, message_id, log_date, content, created_at)
+    )
+
+    conn.commit()
+    inserted = (c.rowcount == 1)
+    conn.close()
+    return inserted
+
+
+def get_personal_updates(user_id: int, limit: int = 10):
+    conn = get_connection()
+    c = conn.cursor()
+
+    c.execute(
+        """
+        SELECT log_date, content, created_at
+        FROM daily_personal_updates
+        WHERE user_id = ?
+        ORDER BY log_date DESC
+        LIMIT ?
+        """,
+        (user_id, limit)
+    )
+
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+
+def get_personal_update_by_date(user_id: int, log_date: str):
+    conn = get_connection()
+    c = conn.cursor()
+
+    c.execute(
+        """
+        SELECT log_date, content, created_at
+        FROM daily_personal_updates
+        WHERE user_id = ? AND log_date = ?
+        """,
+        (user_id, log_date)
+    )
+
+    row = c.fetchone()
+    conn.close()
+    return row
+
+
+def get_user_updates_for_mod_view(user_id: int, limit: int = 10):
+    """
+    Same as get_personal_updates, but kept separate for clarity / future expansion.
+    """
+    return get_personal_updates(user_id, limit=limit)
