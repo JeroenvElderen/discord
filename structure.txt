@@ -13,6 +13,7 @@ project/
 ├── cogs/
 │      ├── introductions.py
 │      ├── identity_path.py
+│      ├── daily_image_channel.py
 │      ├── image_moderation.py
 │      └── rules.py
 

@@ -1,4 +1,5 @@
 import discord
+import asyncio
 from discord.ext import commands, tasks
 from discord import ui
 
@@ -19,12 +20,25 @@ class ApprovalView(ui.View):
         self.member_id = member_id
         self.role_id = role_id
 
-    async def _lock_channel(self, channel: discord.TextChannel):
-        await channel.edit(
-            overwrites={
-                channel.guild.default_role: discord.PermissionOverwrite(view_channel=False)
-            }
+    async def _finalize_and_delete(self, interaction: discord.Interaction, result_text: str):
+        for item in self.children:
+            item.disabled = True
+        await interaction.message.edit(view=self)
+
+        await interaction.followup.send(result_text, ephemeral=True)
+        await interaction.followup.send(
+            "🧹 This channel will be deleted in **60 seconds**.",
+            ephemeral=True
         )
+        await asyncio.sleep(60)
+
+        try:
+            await interaction.channel.delete(reason="Verification completed")
+        except discord.NotFound:
+            pass
+        except discord.Forbidden:
+            pass
+
 
     @ui.button(
         label="✅ Approve",
@@ -32,8 +46,10 @@ class ApprovalView(ui.View):
         custom_id="identity_approval:approve"
     )
     async def approve(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
         if not interaction.user.guild_permissions.manage_roles:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ You do not have permission to approve verifications.",
                 ephemeral=True
             )
@@ -41,12 +57,8 @@ class ApprovalView(ui.View):
 
         guild = interaction.guild
         member = guild.get_member(self.member_id)
-
         if not member:
-            await interaction.response.send_message(
-                "❌ Member not found.",
-                ephemeral=True
-            )
+            await interaction.followup.send("❌ Member not found.", ephemeral=True)
             return
 
         role = guild.get_role(self.role_id)
@@ -66,11 +78,7 @@ class ApprovalView(ui.View):
             f"✅ {member.mention} has been **approved** as **{role.name}**."
         )
 
-        await self._lock_channel(interaction.channel)
-        await interaction.response.send_message(
-            "Approved and ticket locked.",
-            ephemeral=True
-        )
+        await self._finalize_and_delete(interaction, "Approved and ticket completed.")
 
     @ui.button(
         label="❌ Reject",
@@ -78,8 +86,10 @@ class ApprovalView(ui.View):
         custom_id="identity_approval:reject"
     )
     async def reject(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
         if not interaction.user.guild_permissions.manage_roles:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "❌ You do not have permission to reject verifications.",
                 ephemeral=True
             )
@@ -90,11 +100,7 @@ class ApprovalView(ui.View):
             "You may contact staff if you believe this was a mistake."
         )
 
-        await self._lock_channel(interaction.channel)
-        await interaction.response.send_message(
-            "Rejected and ticket locked.",
-            ephemeral=True
-        )
+        await self._finalize_and_delete(interaction, "Rejected and ticket completed.")
 
 
 # =========================
@@ -103,59 +109,74 @@ class ApprovalView(ui.View):
 class IdentityPathView(ui.View):
     def __init__(self):
         super().__init__(timeout=None)
+        self.active_creations: set[int] = set()  # 🔒 atomic user lock
 
     async def _create_ticket(self, interaction, identity: str, role_id: int):
         guild = interaction.guild
         member = interaction.user
-        category = guild.get_channel(CATEGORY_VERIFICATION)
-        staff_role = guild.get_role(ROLE_STAFF)
 
-        if not category or not staff_role:
-            await interaction.response.send_message(
-                "❌ Verification system misconfigured. Contact staff.",
+        # 🔒 HARD ATOMIC LOCK (prevents race conditions)
+        if member.id in self.active_creations:
+            await interaction.followup.send(
+                "ℹ️ You already have an active verification ticket.",
                 ephemeral=True
             )
             return
 
-        channel_name = f"verify-{identity}-{member.name}".lower()
+        self.active_creations.add(member.id)
 
-        for ch in category.channels:
-            if ch.name == channel_name:
-                await interaction.response.send_message(
-                    "ℹ️ You already have an open verification ticket.",
+        try:
+            category = guild.get_channel(CATEGORY_VERIFICATION)
+            staff_role = guild.get_role(ROLE_STAFF)
+
+            if not category or not staff_role:
+                await interaction.followup.send(
+                    "❌ Verification system misconfigured. Contact staff.",
                     ephemeral=True
                 )
                 return
 
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            member: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            staff_role: discord.PermissionOverwrite(view_channel=True, send_messages=True)
-        }
+            # Secondary safety check (existing channels)
+            for ch in category.channels:
+                if ch.topic == str(member.id):
+                    await interaction.followup.send(
+                        "ℹ️ You already have an active verification ticket.",
+                        ephemeral=True
+                    )
+                    return
 
-        channel = await guild.create_text_channel(
-            name=channel_name,
-            category=category,
-            overwrites=overwrites,
-            reason="Manual identity verification"
-        )
+            channel = await guild.create_text_channel(
+                name=f"verify-{identity}-{member.name}".lower(),
+                category=category,
+                overwrites={
+                    guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                    member: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+                    staff_role: discord.PermissionOverwrite(view_channel=True, send_messages=True)
+                },
+                topic=str(member.id),
+                reason="Manual identity verification"
+            )
 
-        embed = discord.Embed(
-            title="🛂 Identity Verification",
-            description=(
-                f"**User:** {member.mention}\n"
-                f"**Requested identity:** {identity.capitalize()}\n\n"
-                "Staff must manually approve or reject this request."
-            ),
-            color=discord.Color.orange()
-        )
+            embed = discord.Embed(
+                title="🛂 Identity Verification",
+                description=(
+                    f"**User:** {member.mention}\n"
+                    f"**Requested identity:** {identity.capitalize()}\n\n"
+                    "Staff must manually approve or reject this request."
+                ),
+                color=discord.Color.orange()
+            )
 
-        await channel.send(embed=embed, view=ApprovalView(member.id, role_id))
+            await channel.send(embed=embed, view=ApprovalView(member.id, role_id))
 
-        await interaction.response.send_message(
-            "🛂 Verification started. A private ticket has been opened.",
-            ephemeral=True
-        )
+            await interaction.followup.send(
+                "🛂 Verification started. A private ticket has been opened.",
+                ephemeral=True
+            )
+
+        finally:
+            # 🔓 RELEASE LOCK
+            self.active_creations.discard(member.id)
 
     @ui.button(
         label="🌿 Verified Naturist",
@@ -163,6 +184,7 @@ class IdentityPathView(ui.View):
         custom_id="identity_path:naturist"
     )
     async def naturist(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.defer(ephemeral=True)
         await self._create_ticket(interaction, "naturist", ROLE_VERIFIED_NATURIST)
 
     @ui.button(
@@ -171,90 +193,60 @@ class IdentityPathView(ui.View):
         custom_id="identity_path:nudist"
     )
     async def nudist(self, interaction: discord.Interaction, button: ui.Button):
+        await interaction.response.defer(ephemeral=True)
         await self._create_ticket(interaction, "nudist", ROLE_VERIFIED_NUDIST)
 
 
 # =========================
-# Cog (Self-Healing)
+# Cog (SINGLE persistent view)
 # =========================
 class IdentityPath(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.identity_view = IdentityPathView()  # SINGLE instance
         self.ensure_identity_embed.start()
 
     async def cog_load(self):
-        # Register persistent view ONCE
-        self.bot.add_view(IdentityPathView())
+        self.bot.add_view(self.identity_view)
 
     async def cog_unload(self):
         self.ensure_identity_embed.cancel()
 
-    async def _get_identity_channel(self) -> discord.TextChannel | None:
+    async def _get_identity_channel(self):
         channel = self.bot.get_channel(CHANNEL_IDENTITY_PATH)
         if channel:
             return channel
-
         try:
             return await self.bot.fetch_channel(CHANNEL_IDENTITY_PATH)
         except (discord.NotFound, discord.Forbidden):
             return None
 
-    async def _post_identity_embed(self, channel: discord.TextChannel):
+    async def _post_identity_embed(self, channel):
         embed = discord.Embed(
             title="🧭 Choose Your Identity Path",
             description=(
-            "This community brings together people who value body freedom, "
-            "respect, and authenticity.\n\n"
-            "Please choose the identity path that best reflects **how you personally "
-            "relate to social nudity or naturism**.\n\n"
-            "• This choice represents **identity**, not status or hierarchy\n"
-            "• Only **one** identity path may be approved\n"
-            "• All requests require **manual staff verification**"
+                "Choose the identity path that best reflects how you relate "
+                "to social nudity or naturism.\n\n"
+                "• Only one identity may be approved\n"
+                "• Manual staff verification required"
             ),
             color=discord.Color.green()
         )
 
-        embed.add_field(
-            name="🌿 Verified Naturist",
-            value=(
-            "For members who practice or support **naturism** as a lifestyle or philosophy.\n\n"
-            "Naturism emphasizes:\n"
-            "• Comfort with social nudity in appropriate settings\n"
-            "• Body acceptance and non-sexualized nudity\n"
-            "• Respect for others, nature, and community values"
-            ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="☀️ Verified Nudist",
-            value=(
-            "For members who identify with **nudism** as a personal or social expression.\n\n"
-            "Nudism often focuses on:\n"
-            "• Personal freedom and body autonomy\n"
-            "• Being nude as a natural state of being\n"
-            "• Comfort with nudity independent of environment or philosophy"
-        ),
-            inline=False
-        )
-
-        await channel.send(embed=embed, view=IdentityPathView())
-        print("✅ Identity Path embed posted (self-healed).")
-
+        await channel.send(embed=embed, view=self.identity_view)
+        print("✅ Identity Path embed posted.")
 
     @tasks.loop(minutes=2)
     async def ensure_identity_embed(self):
         await self.bot.wait_until_ready()
-
         channel = await self._get_identity_channel()
         if not channel:
             return
 
         async for msg in channel.history(limit=20):
             if msg.author == self.bot.user and msg.embeds:
-                return  # Embed exists
+                return
 
-        # Missing → heal
         await self._post_identity_embed(channel)
 
     @ensure_identity_embed.before_loop
