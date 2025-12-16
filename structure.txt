@@ -16,6 +16,7 @@ project/
 │      ├── daily_image_channel.py
 │      ├── weekly_wind_down.py
 │      ├── image_moderation.py
+│      ├── featured_photos.py
 │      ├── daily_personal_updates.py
 │      └── rules.py
 

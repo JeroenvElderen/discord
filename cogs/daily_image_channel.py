@@ -17,7 +17,7 @@ class DailyImageChannel(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        # DB cleanup (table is created by setup_database() in bot.py)
+        # Cleanup old daily records (restart-safe)
         cleanup_old_daily_posts()
 
         for channel_id in DAILY_IMAGE_CHANNELS:
@@ -25,26 +25,35 @@ class DailyImageChannel(commands.Cog):
             if not channel:
                 continue
 
-            # Prevent duplicate pinned embeds
-            async for msg in channel.history(limit=20):
-                if msg.author.id == self.bot.user.id and msg.embeds:
-                    return
+            # Check if rules embed already exists in this channel
+            rules_already_posted = False
+            async for msg in channel.history(limit=25):
+                if (
+                    msg.author.id == self.bot.user.id
+                    and msg.embeds
+                    and msg.embeds[0].title == "📸 Channel Rules"
+                ):
+                    rules_already_posted = True
+                    break
+
+            if rules_already_posted:
+                continue
 
             embed = discord.Embed(
                 title="📸 Channel Rules",
                 description=(
                     "• React with emoji\n"
                     "• Reply to images to say positive things\n"
-                    "• One image post per user per day\n"
-                    "• New messages must contain an image\n"
-                    "• Text-only posts are not allowed\n\n"
-                    "Replies without images are allowed."
+                    "• **One image post per user per day**\n"
+                    "• **New messages must contain an image**\n"
+                    "• **Text-only posts are not allowed**\n\n"
+                    "Replies without images **are allowed**."
                 ),
                 color=discord.Color.green()
             )
 
             rules_message = await channel.send(embed=embed)
-            await rules_message.pin()
+            await rules_message.pin(reason="Image channel rules")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -63,17 +72,17 @@ class DailyImageChannel(commands.Cog):
             if a.content_type and a.content_type.startswith("image/")
         ]
 
-        # No image = delete
+        # No image → delete
         if not images:
             await message.delete()
             return
 
-        # Restart-safe daily limit
+        # Enforce restart-safe daily limit
         if has_posted_today(message.author.id, message.channel.id):
             await message.delete()
             return
 
-        # Record successful post
+        # Record valid post
         record_post(message.author.id, message.channel.id)
 
 

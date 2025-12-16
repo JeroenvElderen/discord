@@ -26,9 +26,8 @@ class FeaturedPhotos(commands.Cog):
     Weekly Featured Photos system:
     - Primary window: last 7 days
     - Fallback: last 30 days
-    - Final fallback: whole channel (up to limit)
+    - Final fallback: whole channel
     - Uses database to prevent duplicate features
-    - Text-only discussion allowed (moderators exempt)
     """
 
     def __init__(self, bot: commands.Bot):
@@ -44,6 +43,13 @@ class FeaturedPhotos(commands.Cog):
         self._weekly_featured_task.cancel()
 
     # --------------------------------------------------
+    # Startup hook (guarantees info embed exists)
+    # --------------------------------------------------
+    @commands.Cog.listener()
+    async def on_ready(self):
+        await self._ensure_info_embed()
+
+    # --------------------------------------------------
     # Moderator check
     # --------------------------------------------------
     def _is_moderator(self, member: discord.Member) -> bool:
@@ -55,13 +61,14 @@ class FeaturedPhotos(commands.Cog):
         )
 
     # --------------------------------------------------
-    # Persistent Weekly Highlights info embed
+    # Persistent Weekly Highlights info embed (PINNED)
     # --------------------------------------------------
     async def _ensure_info_embed(self):
         channel = self.bot.get_channel(CHANNEL_FEATURED_PHOTOS)
         if not isinstance(channel, discord.TextChannel):
             return
 
+        # Look for existing embed (pinned or not)
         async for msg in channel.history(limit=50, oldest_first=True):
             if (
                 msg.author == self.bot.user
@@ -69,8 +76,15 @@ class FeaturedPhotos(commands.Cog):
                 and msg.embeds[0].footer
                 and msg.embeds[0].footer.text == FEATURED_INFO_TAG
             ):
+                # Ensure it is pinned
+                if not msg.pinned:
+                    try:
+                        await msg.pin(reason="Weekly Highlights info")
+                    except discord.Forbidden:
+                        pass
                 return
 
+        # Create embed if not found
         embed = discord.Embed(
             title="🌟 Weekly Highlights",
             description=(
@@ -90,10 +104,14 @@ class FeaturedPhotos(commands.Cog):
         )
         embed.set_footer(text=FEATURED_INFO_TAG)
 
-        await channel.send(embed=embed)
+        msg = await channel.send(embed=embed)
+        try:
+            await msg.pin(reason="Weekly Highlights info")
+        except discord.Forbidden:
+            pass
 
     # --------------------------------------------------
-    # Collect image candidates with time window
+    # Collect image candidates
     # --------------------------------------------------
     async def _collect_image_candidates(
         self,
@@ -108,7 +126,7 @@ class FeaturedPhotos(commands.Cog):
 
         candidates: list[dict] = []
 
-        async for msg in channel.history(limit=max_messages, oldest_first=False):
+        async for msg in channel.history(limit=max_messages):
             if cutoff and msg.created_at < cutoff:
                 break
 
@@ -160,7 +178,7 @@ class FeaturedPhotos(commands.Cog):
             return
 
         source_ids = [CHANNEL_BARE_LIFE, CHANNEL_BARE_NATURE]
-        windows = [7, 30, None]  # None = whole channel
+        windows = [7, 30, None]
 
         chosen = None
 
@@ -215,40 +233,6 @@ class FeaturedPhotos(commands.Cog):
     @_weekly_featured_task.before_loop
     async def _before_weekly_featured_task(self):
         await self.bot.wait_until_ready()
-        await self._ensure_info_embed()
-
-    # --------------------------------------------------
-    # Enforcement: text-only discussion (mods exempt)
-    # --------------------------------------------------
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if message.author.bot:
-            return
-
-        if message.channel.id != CHANNEL_FEATURED_PHOTOS:
-            return
-
-        if not isinstance(message.author, discord.Member):
-            return
-
-        if self._is_moderator(message.author):
-            return
-
-        # Block attachments
-        if message.attachments:
-            try:
-                await message.delete()
-            except discord.Forbidden:
-                pass
-            return
-
-        # Block links
-        content = message.content.lower()
-        if "http://" in content or "https://" in content:
-            try:
-                await message.delete()
-            except discord.Forbidden:
-                pass
 
 
 async def setup(bot: commands.Bot):
