@@ -136,22 +136,28 @@ class NatureRouter(commands.Cog):
         # LIFE → NATURE
         if message.channel.id == CHANNEL_BARE_LIFE and score >= NATURE_THRESHOLD:
             target = self.bot.get_channel(CHANNEL_BARE_NATURE)
-            if target and not await self._already_posted_today(target, message.author):
-                await self._repost(message, target, score)
-                await message.reply(
-                    "🌿 Detected outdoor nature — reposted to **#bare-nature**",
-                    mention_author=False,
-                )
+            if not target:
+                return
+
+            if await self._already_posted_today(target, message.author):
+                await message.delete()
+                return
+
+            await self._repost(message, target, score)
+            await message.delete()
 
         # NATURE → LIFE
         elif message.channel.id == CHANNEL_BARE_NATURE and score < NATURE_THRESHOLD:
             target = self.bot.get_channel(CHANNEL_BARE_LIFE)
-            if target and not await self._already_posted_today(target, message.author):
-                await self._repost(message, target, score)
-                await message.reply(
-                    "🏠 Detected daily life — reposted to **#bare-life**",
-                    mention_author=False,
-                )
+            if not target:
+                return
+
+            if await self._already_posted_today(target, message.author):
+                await message.delete()
+                return
+
+            await self._repost(message, target, score)
+            await message.delete()
 
 
 async def setup(bot: commands.Bot):
