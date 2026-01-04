@@ -15,7 +15,7 @@ from config import (
 
 from database import (
     is_image_already_featured,
-    record_featured_photo,  # returns bool now
+    record_featured_photo,  # MUST return bool (True inserted, False duplicate)
 )
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
@@ -31,16 +31,16 @@ class FeaturedPhotos(commands.Cog):
     - Primary window: last 7 days
     - Fallback: last 30 days
     - Final fallback: whole channel
-    - DB prevents duplicates (featured_photos.image_url PRIMARY KEY)
+    - Uses database to prevent duplicate features
     - Scheduled: Sunday at 18:00 Europe/Dublin
-    - Manual trigger: /feature (mods only)
+    - Manual trigger: /feature (moderators only)
     """
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     # --------------------------------------------------
-    # Lifecycle
+    # Proper lifecycle handling
     # --------------------------------------------------
 
     async def cog_load(self):
@@ -66,10 +66,14 @@ class FeaturedPhotos(commands.Cog):
         return perms.administrator or perms.manage_messages or perms.manage_guild
 
     # --------------------------------------------------
-    # URL normalization (prevents duplicates caused by query params)
+    # Normalize URLs to prevent "same image, different URL" duplicates
     # --------------------------------------------------
 
     def _normalize_url(self, url: str) -> str:
+        """
+        Removes query string + fragment so CDN parameter variations
+        (e.g., ?width=..., ?ex=..., etc.) don't bypass dedupe.
+        """
         parts = urlsplit(url)
         return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
@@ -131,7 +135,6 @@ class FeaturedPhotos(commands.Cog):
         days: int | None,
         max_messages: int = 5000,
     ) -> list[dict]:
-
         cutoff = (
             datetime.now(timezone.utc) - timedelta(days=days)
             if days is not None
@@ -181,7 +184,7 @@ class FeaturedPhotos(commands.Cog):
         return candidates
 
     # --------------------------------------------------
-    # Core logic: select + record + post
+    # Core logic: select + record + post (NO DUPLICATES)
     # --------------------------------------------------
 
     async def _feature_once(
@@ -191,8 +194,12 @@ class FeaturedPhotos(commands.Cog):
         footer_note: str,
     ) -> bool:
         """
-        Returns True if posted, False if none eligible.
-        Only posts if DB insert succeeds (prevents duplicates).
+        Returns True if a photo was posted, False if none eligible.
+
+        Key behavior:
+        - Normalizes URL before DB checks/storing.
+        - ONLY posts if DB insert succeeds.
+        - Retries other candidates if insert is ignored (duplicate/race).
         """
         source_ids = [CHANNEL_BARE_LIFE, CHANNEL_BARE_NATURE]
         windows = [7, 30, None]
@@ -202,8 +209,10 @@ class FeaturedPhotos(commands.Cog):
             pool.clear()
             for cid in source_ids:
                 src_channel = self.bot.get_channel(cid)
-                if isinstance(src_channel, discord.TextChannel):
-                    pool.extend(await self._collect_image_candidates(src_channel, days=window))
+                if not isinstance(src_channel, discord.TextChannel):
+                    continue
+                pool.extend(await self._collect_image_candidates(src_channel, days=window))
+
             if pool:
                 break
 
@@ -214,10 +223,10 @@ class FeaturedPhotos(commands.Cog):
             )
             return False
 
+        # Shuffle and attempt multiple inserts to avoid duplicates or races
         random.shuffle(pool)
 
-        # Try multiple candidates to handle races / already-featured inserts.
-        for chosen in pool[:50]:
+        for chosen in pool[:50]:  # cap attempts
             inserted = record_featured_photo(
                 image_url=chosen["image_url"],
                 channel_id=chosen["channel_id"],
@@ -227,7 +236,7 @@ class FeaturedPhotos(commands.Cog):
             )
 
             if not inserted:
-                # Already featured (or another process/command inserted it first)
+                # Already featured or race condition; try another image
                 continue
 
             embed = discord.Embed(
@@ -245,7 +254,7 @@ class FeaturedPhotos(commands.Cog):
             await featured_channel.send(embed=embed)
             return True
 
-        # If all attempts were duplicates by insert-time
+        # If we couldn't insert any candidate (all duplicates by insert-time)
         await featured_channel.send(
             "🌟 **Featured Photo**\n"
             "No eligible images were found."
@@ -256,7 +265,7 @@ class FeaturedPhotos(commands.Cog):
     # Scheduled task: fires daily at 18:00 Dublin, posts only on Sunday
     # --------------------------------------------------
 
-    @tasks.loop(time=dt_time(hour=18, minute=0, tzinfo=DUBLIN_TZ)))
+    @tasks.loop(time=dt_time(hour=18, minute=0, tzinfo=DUBLIN_TZ))
     async def _weekly_featured_task(self):
         now_local = datetime.now(DUBLIN_TZ)
         if now_local.weekday() != SUNDAY_WEEKDAY:
