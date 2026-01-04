@@ -20,6 +20,9 @@ from database import (
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 FEATURED_INFO_TAG = "FEATURED_WEEKLY_INFO"
 
+DUBLIN_TZ = ZoneInfo("Europe/Dublin")
+SUNDAY_WEEKDAY = 6  # Monday=0 ... Sunday=6
+
 
 class FeaturedPhotos(commands.Cog):
     """
@@ -27,21 +30,20 @@ class FeaturedPhotos(commands.Cog):
     - Primary window: last 7 days
     - Fallback: last 30 days
     - Final fallback: whole channel
-    - Uses database to prevent duplicate features
+    - Uses database to prevent duplicate features (image_url PRIMARY KEY + INSERT OR IGNORE)
+    - Scheduled: Sunday at 18:00 Europe/Dublin
+    - Manual trigger: /feature (moderators only)
     """
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     # --------------------------------------------------
-    # Proper lifecycle handling (IMPORTANT)
+    # Proper lifecycle handling
     # --------------------------------------------------
 
     async def cog_load(self):
-        dublin = ZoneInfo("Europe/Dublin")
-        self._weekly_featured_task.change_interval(
-            time=dt_time(hour=18, minute=0, tzinfo=dublin)
-        )
+        # Start the loop (decorator defines the 18:00 schedule)
         self._weekly_featured_task.start()
 
     async def cog_unload(self):
@@ -61,11 +63,7 @@ class FeaturedPhotos(commands.Cog):
 
     def _is_moderator(self, member: discord.Member) -> bool:
         perms = member.guild_permissions
-        return (
-            perms.administrator
-            or perms.manage_messages
-            or perms.manage_guild
-        )
+        return perms.administrator or perms.manage_messages or perms.manage_guild
 
     # --------------------------------------------------
     # Persistent Weekly Highlights info embed (PINNED)
@@ -99,7 +97,7 @@ class FeaturedPhotos(commands.Cog):
                 "• Photos are selected from `#bare-life` and `#bare-nature`\n"
                 "• Primary window: last **7 days**\n"
                 "• Fallback windows apply automatically\n"
-                "• Posted every **Friday at 18:00**\n\n"
+                "• Posted every **Sunday at 18:00**\n\n"
                 "**Channel rules**\n"
                 "• Text discussion allowed\n"
                 "• No images, files, or links\n"
@@ -125,7 +123,10 @@ class FeaturedPhotos(commands.Cog):
         days: int | None,
         max_messages: int = 5000,
     ) -> list[dict]:
-
+        """
+        Collect eligible images from a channel in a given time window, excluding
+        anything already featured (checked via DB).
+        """
         cutoff = (
             datetime.now(timezone.utc) - timedelta(days=days)
             if days is not None
@@ -138,6 +139,7 @@ class FeaturedPhotos(commands.Cog):
             if cutoff and msg.created_at < cutoff:
                 break
 
+            # Attachments
             for att in msg.attachments:
                 if (
                     att.content_type
@@ -153,6 +155,7 @@ class FeaturedPhotos(commands.Cog):
                         }
                     )
 
+            # Embeds (image/thumbnail)
             for emb in msg.embeds:
                 img_url = None
                 if emb.image and emb.image.url:
@@ -177,31 +180,30 @@ class FeaturedPhotos(commands.Cog):
         return candidates
 
     # --------------------------------------------------
-    # Weekly featured task
+    # Core logic: select + record + post
     # --------------------------------------------------
 
-    @tasks.loop(time=dt_time(hour=18, minute=0, tzinfo=ZoneInfo("Europe/Dublin")))
-    async def _weekly_featured_task(self):
-        featured_channel = self.bot.get_channel(CHANNEL_FEATURED_PHOTOS)
-        if not isinstance(featured_channel, discord.TextChannel):
-            return
-
+    async def _feature_once(
+        self,
+        *,
+        featured_channel: discord.TextChannel,
+        footer_note: str,
+    ) -> bool:
+        """
+        Returns True if a photo was posted, False if none eligible.
+        """
         source_ids = [CHANNEL_BARE_LIFE, CHANNEL_BARE_NATURE]
         windows = [7, 30, None]
 
-        chosen = None
+        chosen: dict | None = None
 
         for window in windows:
             pool: list[dict] = []
-
             for cid in source_ids:
-                channel = self.bot.get_channel(cid)
-                if not isinstance(channel, discord.TextChannel):
+                src_channel = self.bot.get_channel(cid)
+                if not isinstance(src_channel, discord.TextChannel):
                     continue
-
-                pool.extend(
-                    await self._collect_image_candidates(channel, days=window)
-                )
+                pool.extend(await self._collect_image_candidates(src_channel, days=window))
 
             if pool:
                 chosen = random.choice(pool)
@@ -209,11 +211,13 @@ class FeaturedPhotos(commands.Cog):
 
         if not chosen:
             await featured_channel.send(
-                "🌟 **Featured Photo of the Week**\n"
+                "🌟 **Featured Photo**\n"
                 "No eligible images were found."
             )
-            return
+            return False
 
+        # Record FIRST (DB is authoritative). Because image_url is PRIMARY KEY and we use
+        # INSERT OR IGNORE, this guarantees the same URL will not be featured twice.
         record_featured_photo(
             image_url=chosen["image_url"],
             channel_id=chosen["channel_id"],
@@ -222,8 +226,19 @@ class FeaturedPhotos(commands.Cog):
             featured_at=datetime.now(timezone.utc).isoformat(),
         )
 
+        # If it was already featured (race condition), the insert would be ignored.
+        # In that unlikely case, just try again quickly with a different pick.
+        # (This prevents posting an image that didn't actually record.)
+        if is_image_already_featured(chosen["image_url"]) is False:
+            # Extremely unlikely due to ordering above, but keep it safe.
+            await featured_channel.send(
+                "🌟 **Featured Photo**\n"
+                "A database issue occurred while recording the feature."
+            )
+            return False
+
         embed = discord.Embed(
-            title="🌟 Featured Photo of the Week",
+            title="🌟 Featured Photo",
             description=(
                 f"From <#{chosen['channel_id']}>\n"
                 f"Posted by {chosen['author'].mention if chosen['author'] else 'Unknown'}\n\n"
@@ -232,13 +247,76 @@ class FeaturedPhotos(commands.Cog):
             color=discord.Color.gold(),
         )
         embed.set_image(url=chosen["image_url"])
-        embed.set_footer(text="Automated weekly feature • Fridays 18:00")
+        embed.set_footer(text=footer_note)
 
         await featured_channel.send(embed=embed)
+        return True
+
+    # --------------------------------------------------
+    # Scheduled task: fires daily at 18:00 Dublin, posts only on Sunday
+    # --------------------------------------------------
+
+    @tasks.loop(time=dt_time(hour=18, minute=0, tzinfo=DUBLIN_TZ))
+    async def _weekly_featured_task(self):
+        now_local = datetime.now(DUBLIN_TZ)
+        if now_local.weekday() != SUNDAY_WEEKDAY:
+            return
+
+        featured_channel = self.bot.get_channel(CHANNEL_FEATURED_PHOTOS)
+        if not isinstance(featured_channel, discord.TextChannel):
+            return
+
+        await self._feature_once(
+            featured_channel=featured_channel,
+            footer_note="Automated weekly feature • Sundays 18:00 (Europe/Dublin)",
+        )
 
     @_weekly_featured_task.before_loop
     async def _before_weekly_featured_task(self):
         await self.bot.wait_until_ready()
+
+    # --------------------------------------------------
+    # Manual slash command: /feature (mods only)
+    # --------------------------------------------------
+
+    @discord.app_commands.command(
+        name="feature",
+        description="Post a featured photo now (mods only).",
+    )
+    async def feature_command(self, interaction: discord.Interaction):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            return
+
+        if not self._is_moderator(interaction.user):
+            await interaction.response.send_message(
+                "You do not have permission to use this command.",
+                ephemeral=True,
+            )
+            return
+
+        featured_channel = self.bot.get_channel(CHANNEL_FEATURED_PHOTOS)
+        if not isinstance(featured_channel, discord.TextChannel):
+            await interaction.response.send_message(
+                "Featured channel not found or not a text channel.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        posted = await self._feature_once(
+            featured_channel=featured_channel,
+            footer_note=f"Manual feature by {interaction.user.display_name}",
+        )
+
+        if posted:
+            await interaction.followup.send("Posted a featured photo.", ephemeral=True)
+        else:
+            await interaction.followup.send("No eligible images found.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
