@@ -5,6 +5,7 @@ import discord
 from discord.ext import commands, tasks
 from datetime import datetime, timedelta, timezone, time as dt_time
 from zoneinfo import ZoneInfo
+from urllib.parse import urlsplit, urlunsplit
 
 from config import (
     CHANNEL_BARE_LIFE,
@@ -14,7 +15,7 @@ from config import (
 
 from database import (
     is_image_already_featured,
-    record_featured_photo,
+    record_featured_photo,  # returns bool now
 )
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
@@ -30,20 +31,19 @@ class FeaturedPhotos(commands.Cog):
     - Primary window: last 7 days
     - Fallback: last 30 days
     - Final fallback: whole channel
-    - Uses database to prevent duplicate features (image_url PRIMARY KEY + INSERT OR IGNORE)
+    - DB prevents duplicates (featured_photos.image_url PRIMARY KEY)
     - Scheduled: Sunday at 18:00 Europe/Dublin
-    - Manual trigger: /feature (moderators only)
+    - Manual trigger: /feature (mods only)
     """
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     # --------------------------------------------------
-    # Proper lifecycle handling
+    # Lifecycle
     # --------------------------------------------------
 
     async def cog_load(self):
-        # Start the loop (decorator defines the 18:00 schedule)
         self._weekly_featured_task.start()
 
     async def cog_unload(self):
@@ -64,6 +64,14 @@ class FeaturedPhotos(commands.Cog):
     def _is_moderator(self, member: discord.Member) -> bool:
         perms = member.guild_permissions
         return perms.administrator or perms.manage_messages or perms.manage_guild
+
+    # --------------------------------------------------
+    # URL normalization (prevents duplicates caused by query params)
+    # --------------------------------------------------
+
+    def _normalize_url(self, url: str) -> str:
+        parts = urlsplit(url)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
 
     # --------------------------------------------------
     # Persistent Weekly Highlights info embed (PINNED)
@@ -123,10 +131,7 @@ class FeaturedPhotos(commands.Cog):
         days: int | None,
         max_messages: int = 5000,
     ) -> list[dict]:
-        """
-        Collect eligible images from a channel in a given time window, excluding
-        anything already featured (checked via DB).
-        """
+
         cutoff = (
             datetime.now(timezone.utc) - timedelta(days=days)
             if days is not None
@@ -141,19 +146,17 @@ class FeaturedPhotos(commands.Cog):
 
             # Attachments
             for att in msg.attachments:
-                if (
-                    att.content_type
-                    and att.content_type.startswith("image/")
-                    and not is_image_already_featured(att.url)
-                ):
-                    candidates.append(
-                        {
-                            "image_url": att.url,
-                            "jump_url": msg.jump_url,
-                            "author": msg.author,
-                            "channel_id": channel.id,
-                        }
-                    )
+                if att.content_type and att.content_type.startswith("image/"):
+                    img_url = self._normalize_url(att.url)
+                    if not is_image_already_featured(img_url):
+                        candidates.append(
+                            {
+                                "image_url": img_url,
+                                "jump_url": msg.jump_url,
+                                "author": msg.author,
+                                "channel_id": channel.id,
+                            }
+                        )
 
             # Embeds (image/thumbnail)
             for emb in msg.embeds:
@@ -163,19 +166,17 @@ class FeaturedPhotos(commands.Cog):
                 elif emb.thumbnail and emb.thumbnail.url:
                     img_url = emb.thumbnail.url
 
-                if (
-                    img_url
-                    and img_url.lower().endswith(IMAGE_EXTENSIONS)
-                    and not is_image_already_featured(img_url)
-                ):
-                    candidates.append(
-                        {
-                            "image_url": img_url,
-                            "jump_url": msg.jump_url,
-                            "author": msg.author,
-                            "channel_id": channel.id,
-                        }
-                    )
+                if img_url and img_url.lower().endswith(IMAGE_EXTENSIONS):
+                    img_url = self._normalize_url(img_url)
+                    if not is_image_already_featured(img_url):
+                        candidates.append(
+                            {
+                                "image_url": img_url,
+                                "jump_url": msg.jump_url,
+                                "author": msg.author,
+                                "channel_id": channel.id,
+                            }
+                        )
 
         return candidates
 
@@ -190,73 +191,72 @@ class FeaturedPhotos(commands.Cog):
         footer_note: str,
     ) -> bool:
         """
-        Returns True if a photo was posted, False if none eligible.
+        Returns True if posted, False if none eligible.
+        Only posts if DB insert succeeds (prevents duplicates).
         """
         source_ids = [CHANNEL_BARE_LIFE, CHANNEL_BARE_NATURE]
         windows = [7, 30, None]
 
-        chosen: dict | None = None
-
+        pool: list[dict] = []
         for window in windows:
-            pool: list[dict] = []
+            pool.clear()
             for cid in source_ids:
                 src_channel = self.bot.get_channel(cid)
-                if not isinstance(src_channel, discord.TextChannel):
-                    continue
-                pool.extend(await self._collect_image_candidates(src_channel, days=window))
-
+                if isinstance(src_channel, discord.TextChannel):
+                    pool.extend(await self._collect_image_candidates(src_channel, days=window))
             if pool:
-                chosen = random.choice(pool)
                 break
 
-        if not chosen:
+        if not pool:
             await featured_channel.send(
                 "🌟 **Featured Photo**\n"
                 "No eligible images were found."
             )
             return False
 
-        # Record FIRST (DB is authoritative). Because image_url is PRIMARY KEY and we use
-        # INSERT OR IGNORE, this guarantees the same URL will not be featured twice.
-        record_featured_photo(
-            image_url=chosen["image_url"],
-            channel_id=chosen["channel_id"],
-            message_jump_url=chosen["jump_url"],
-            author_id=chosen["author"].id if chosen["author"] else None,
-            featured_at=datetime.now(timezone.utc).isoformat(),
-        )
+        random.shuffle(pool)
 
-        # If it was already featured (race condition), the insert would be ignored.
-        # In that unlikely case, just try again quickly with a different pick.
-        # (This prevents posting an image that didn't actually record.)
-        if is_image_already_featured(chosen["image_url"]) is False:
-            # Extremely unlikely due to ordering above, but keep it safe.
-            await featured_channel.send(
-                "🌟 **Featured Photo**\n"
-                "A database issue occurred while recording the feature."
+        # Try multiple candidates to handle races / already-featured inserts.
+        for chosen in pool[:50]:
+            inserted = record_featured_photo(
+                image_url=chosen["image_url"],
+                channel_id=chosen["channel_id"],
+                message_jump_url=chosen["jump_url"],
+                author_id=chosen["author"].id if chosen["author"] else None,
+                featured_at=datetime.now(timezone.utc).isoformat(),
             )
-            return False
 
-        embed = discord.Embed(
-            title="🌟 Featured Photo",
-            description=(
-                f"From <#{chosen['channel_id']}>\n"
-                f"Posted by {chosen['author'].mention if chosen['author'] else 'Unknown'}\n\n"
-                f"[View original post]({chosen['jump_url']})"
-            ),
-            color=discord.Color.gold(),
+            if not inserted:
+                # Already featured (or another process/command inserted it first)
+                continue
+
+            embed = discord.Embed(
+                title="🌟 Featured Photo",
+                description=(
+                    f"From <#{chosen['channel_id']}>\n"
+                    f"Posted by {chosen['author'].mention if chosen['author'] else 'Unknown'}\n\n"
+                    f"[View original post]({chosen['jump_url']})"
+                ),
+                color=discord.Color.gold(),
+            )
+            embed.set_image(url=chosen["image_url"])
+            embed.set_footer(text=footer_note)
+
+            await featured_channel.send(embed=embed)
+            return True
+
+        # If all attempts were duplicates by insert-time
+        await featured_channel.send(
+            "🌟 **Featured Photo**\n"
+            "No eligible images were found."
         )
-        embed.set_image(url=chosen["image_url"])
-        embed.set_footer(text=footer_note)
-
-        await featured_channel.send(embed=embed)
-        return True
+        return False
 
     # --------------------------------------------------
     # Scheduled task: fires daily at 18:00 Dublin, posts only on Sunday
     # --------------------------------------------------
 
-    @tasks.loop(time=dt_time(hour=18, minute=0, tzinfo=DUBLIN_TZ))
+    @tasks.loop(time=dt_time(hour=18, minute=0, tzinfo=DUBLIN_TZ)))
     async def _weekly_featured_task(self):
         now_local = datetime.now(DUBLIN_TZ)
         if now_local.weekday() != SUNDAY_WEEKDAY:

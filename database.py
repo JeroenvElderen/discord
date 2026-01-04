@@ -54,7 +54,7 @@ def setup_database():
     """)
 
     # ======================
-    # ✅ NEW: Featured photos history
+    # Featured photos history (image_url is UNIQUE via PRIMARY KEY)
     # ======================
     c.execute("""
         CREATE TABLE IF NOT EXISTS featured_photos (
@@ -262,7 +262,7 @@ def get_user_updates_for_mod_view(user_id: int, limit: int = 10):
 
 
 # ======================
-# ✅ Featured photos logic
+# Featured photos logic
 # ======================
 
 def is_image_already_featured(image_url: str) -> bool:
@@ -288,7 +288,10 @@ def record_featured_photo(
     message_jump_url: str,
     author_id: int | None,
     featured_at: str,
-):
+) -> bool:
+    """
+    Returns True if inserted, False if it already existed (duplicate).
+    """
     conn = get_connection()
     c = conn.cursor()
 
@@ -302,7 +305,9 @@ def record_featured_photo(
     )
 
     conn.commit()
+    inserted = (c.rowcount == 1)
     conn.close()
+    return inserted
 
 
 def get_featured_history(limit: int = 20):
